@@ -18,11 +18,10 @@ def md5_bytes_upper(b: bytes) -> str:
 
 @register("meme_echo", "YourName", "群聊表情包命中即复读（命令收录+别名管理）", "1.1.0")
 class MemeEcho(Star):
-    def __init__(self, context: Context, config: Optional[Any] = None):
+   def __init__(self, context: Context, *args, **kwargs):
         super().__init__(context)
-
-        # ✅ 兼容：某些版本不会传 config
-        self.config = config or {}
+        # 如果未来框架传了 config，会在 kwargs 或 args 里，这里兜底取一下
+        self.config = kwargs.get("config", None)
 
         self.data_dir = Path(StarTools.get_data_dir(self.plugin_name))
         self.meme_dir = self.data_dir / "memes"
