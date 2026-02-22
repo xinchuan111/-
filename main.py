@@ -4,9 +4,9 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 
-from astrbot.api import logger, AstrBotConfig
+from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 import astrbot.api.message_components as Comp
@@ -18,53 +18,45 @@ def md5_bytes_upper(b: bytes) -> str:
 
 @register("meme_echo", "YourName", "群聊表情包命中即复读（命令收录+别名管理）", "1.1.0")
 class MemeEcho(Star):
-    """
-    /meme add              收录一张表情包（先发命令再发图，或命令同条带图）
-    /meme name <KEY> <别名> 绑定别名
-    /meme show <KEY|别名>   查看详情
-    /meme list             列出（含别名）
-    /meme del <KEY|别名>    删除
-    /meme reload           重建索引
-    """
-
-    def __init__(self, context: Context, config: AstrBotConfig):
+    def __init__(self, context: Context, config: Optional[Any] = None):
         super().__init__(context)
-        self.config = config
+
+        # ✅ 兼容：某些版本不会传 config
+        self.config = config or {}
 
         self.data_dir = Path(StarTools.get_data_dir(self.plugin_name))
         self.meme_dir = self.data_dir / "memes"
         self.meme_dir.mkdir(parents=True, exist_ok=True)
 
-        # key -> filename
-        self.index_path = self.data_dir / "index.json"
-        self.index: Dict[str, str] = {}
+        self.index_path = self.data_dir / "index.json"   # key -> filename
+        self.alias_path = self.data_dir / "alias.json"   # alias -> key
 
-        # alias -> key
-        self.alias_path = self.data_dir / "alias.json"
+        self.index: Dict[str, str] = {}
         self.alias: Dict[str, str] = {}
 
         # (group_id, user_id) -> expire_ts
         self.awaiting: Dict[Tuple[str, str], float] = {}
 
-        self._load_state()
+        self._load_or_rebuild()
         logger.error(f"✅ meme_echo loaded. count={len(self.index)} alias={len(self.alias)} dir={self.meme_dir}")
 
     # ---------- state ----------
-    def _load_state(self) -> None:
-        self._rebuild_index_if_needed()
+    def _load_or_rebuild(self) -> None:
+        self._load_index()
+        if not self.index:
+            self._rebuild_index()
         self._load_alias()
 
-    def _rebuild_index_if_needed(self) -> None:
-        # 读 index.json，若不存在/损坏则扫描目录重建
+    def _load_index(self) -> None:
         try:
             if self.index_path.exists():
-                self.index = json.loads(self.index_path.read_text("utf-8"))
-                # basic normalize
-                self.index = {k.upper(): v for k, v in self.index.items()}
-                return
+                data = json.loads(self.index_path.read_text("utf-8"))
+                self.index = {str(k).upper(): str(v) for k, v in data.items()}
         except Exception:
-            pass
-        self._rebuild_index()
+            self.index = {}
+
+    def _save_index(self) -> None:
+        self.index_path.write_text(json.dumps(self.index, ensure_ascii=False, indent=2), "utf-8")
 
     def _rebuild_index(self) -> None:
         self.index.clear()
@@ -74,24 +66,18 @@ class MemeEcho(Star):
             stem = p.stem.upper()
             if len(stem) == 32:
                 self.index[stem] = p.name
-        self.index_path.write_text(json.dumps(self.index, ensure_ascii=False, indent=2), "utf-8")
+        self._save_index()
 
     def _load_alias(self) -> None:
         try:
             if self.alias_path.exists():
-                self.alias = json.loads(self.alias_path.read_text("utf-8"))
-                # normalize alias: strip
-                self.alias = {str(a).strip(): str(k).upper() for a, k in self.alias.items()}
-            else:
-                self.alias = {}
+                data = json.loads(self.alias_path.read_text("utf-8"))
+                self.alias = {str(a).strip(): str(k).upper() for a, k in data.items()}
         except Exception:
             self.alias = {}
 
     def _save_alias(self) -> None:
         self.alias_path.write_text(json.dumps(self.alias, ensure_ascii=False, indent=2), "utf-8")
-
-    def _save_index(self) -> None:
-        self.index_path.write_text(json.dumps(self.index, ensure_ascii=False, indent=2), "utf-8")
 
     # ---------- helpers ----------
     def _extract_first_image(self, event: AstrMessageEvent) -> Optional[Comp.Image]:
@@ -110,20 +96,12 @@ class MemeEcho(Star):
         return (group_id, user_id)
 
     def _resolve_key(self, key_or_alias: str) -> Optional[str]:
-        """
-        支持传 KEY 或别名，返回 KEY（大写）
-        """
-        if not key_or_alias:
-            return None
-        s = key_or_alias.strip()
+        s = (key_or_alias or "").strip()
         if len(s) == 32 and all(c in "0123456789abcdefABCDEF" for c in s):
             return s.upper()
         return self.alias.get(s)
 
     def _reverse_alias(self, key: str) -> Optional[str]:
-        """
-        通过 key 找一个别名（若多个别名绑定同一 key，返回第一个）
-        """
         key = key.upper()
         for a, k in self.alias.items():
             if k == key:
@@ -135,12 +113,10 @@ class MemeEcho(Star):
         ext = (ext or ".png").lower()
         if not ext.startswith("."):
             ext = "." + ext
-
         filename = f"{key}{ext}"
         dst = self.meme_dir / filename
         if not dst.exists():
             dst.write_bytes(data)
-
         self.index[key] = filename
         self._save_index()
         return key
@@ -151,7 +127,6 @@ class MemeEcho(Star):
         if not name:
             return False
 
-        # 删除文件
         p = self.meme_dir / name
         try:
             if p.exists():
@@ -159,16 +134,16 @@ class MemeEcho(Star):
         except Exception:
             pass
 
-        # 删除 index
         self.index.pop(key, None)
         self._save_index()
 
         # 删除所有指向该 key 的别名
-        to_del = [a for a, k in self.alias.items() if k == key]
-        for a in to_del:
+        bad = [a for a, k in self.alias.items() if k == key]
+        for a in bad:
             self.alias.pop(a, None)
-        if to_del:
+        if bad:
             self._save_alias()
+
         return True
 
     # ---------- commands ----------
@@ -180,7 +155,7 @@ class MemeEcho(Star):
         if action == "add":
             img = self._extract_first_image(event)
             if img is not None:
-                ok, key_or_err = await self._add_from_image_segment(event, img)
+                ok, key_or_err = await self._add_from_image_segment(img)
                 if ok:
                     alias = self._reverse_alias(key_or_err)
                     hint = f"（别名：{alias}）" if alias else f"\n可用：/meme name {key_or_err} <别名> 绑定别名"
@@ -196,7 +171,7 @@ class MemeEcho(Star):
 
         if action == "name":
             if len(parts) < 4:
-                yield event.plain_result("用法：/meme name <KEY> <别名>\n例：/meme name 0B62C72C... 狗头")
+                yield event.plain_result("用法：/meme name <KEY> <别名>")
                 return
             key = parts[2].strip().upper()
             alias = " ".join(parts[3:]).strip()
@@ -205,12 +180,6 @@ class MemeEcho(Star):
                 yield event.plain_result(f"未找到该 KEY：{key}\n先用 /meme add 收录它")
                 return
 
-            # 避免别名看起来像 key
-            if len(alias) == 32 and all(c in "0123456789abcdefABCDEF" for c in alias):
-                yield event.plain_result("别名不要设置成 32 位十六进制（容易和 KEY 混淆）")
-                return
-
-            # 如果该别名已存在，覆盖指向新的 key
             self.alias[alias] = key
             self._save_alias()
             yield event.plain_result(f"✅ 已设置别名：{alias} -> {key}")
@@ -227,11 +196,7 @@ class MemeEcho(Star):
                 return
             name = self.index.get(key, "")
             alias = self._reverse_alias(key)
-            yield event.plain_result(
-                f"KEY: {key}\n"
-                f"别名: {alias or '（无）'}\n"
-                f"文件: {name or '（不存在）'}"
-            )
+            yield event.plain_result(f"KEY: {key}\n别名: {alias or '（无）'}\n文件: {name or '（不存在）'}")
             return
 
         if action == "list":
@@ -239,13 +204,9 @@ class MemeEcho(Star):
             if not keys:
                 yield event.plain_result("当前还没有收录任何表情包。用：/meme add")
                 return
-
-            # 展示前 10 个，优先显示有别名的
             lines = []
-            # 先列别名
             for a, k in list(self.alias.items())[:10]:
                 lines.append(f"{a} -> {k}")
-            # 再补一些 key
             if len(lines) < 10:
                 for k in keys:
                     if len(lines) >= 10:
@@ -253,7 +214,6 @@ class MemeEcho(Star):
                     if k in self.alias.values():
                         continue
                     lines.append(k)
-
             more = "" if len(keys) <= 10 else f"\n…共 {len(keys)} 个，仅显示部分"
             yield event.plain_result("已收录：\n" + "\n".join(lines) + more)
             return
@@ -275,7 +235,6 @@ class MemeEcho(Star):
 
         if action == "reload":
             self._rebuild_index()
-            # 清理 alias 中指向不存在 key 的项
             bad = [a for a, k in self.alias.items() if k not in self.index]
             for a in bad:
                 self.alias.pop(a, None)
@@ -303,7 +262,7 @@ class MemeEcho(Star):
         if exp and time.time() <= exp:
             img = self._extract_first_image(event)
             if img is not None:
-                ok, key_or_err = await self._add_from_image_segment(event, img)
+                ok, key_or_err = await self._add_from_image_segment(img)
                 self.awaiting.pop(gu, None)
                 if ok:
                     alias = self._reverse_alias(key_or_err)
@@ -316,11 +275,10 @@ class MemeEcho(Star):
         elif exp and time.time() > exp:
             self.awaiting.pop(gu, None)
 
-        # 正常命中复读
+        # 命中复读
         msg = event.message_obj
         if not msg or not msg.message:
             return
-
         for seg in msg.message:
             if not isinstance(seg, Comp.Image):
                 continue
@@ -332,14 +290,13 @@ class MemeEcho(Star):
             p = self.meme_dir / name
             if not p.exists():
                 continue
-
             yield event.chain_result([Comp.Image.fromFileSystem(str(p))])
             event.stop_event()
             return
 
     # ---------- download / add ----------
-    async def _add_from_image_segment(self, event: AstrMessageEvent, img: Comp.Image):
-        # 1) 如果平台给了 path 且可读，直接读
+    async def _add_from_image_segment(self, img: Comp.Image):
+        # 1) 本地 path
         path = getattr(img, "path", "") or ""
         if path:
             p = Path(path)
@@ -349,7 +306,7 @@ class MemeEcho(Star):
                 key = self._save_bytes_as_meme(data, ext)
                 return True, key
 
-        # 2) 否则从 url 下载
+        # 2) url 下载
         url = getattr(img, "url", None) or getattr(img, "src", None)
         if not url:
             return False, "图片段没有 url/path，无法获取原图数据"
@@ -357,7 +314,7 @@ class MemeEcho(Star):
         try:
             import aiohttp
         except Exception:
-            return False, "缺少 aiohttp，无法下载图片。请在环境中安装 aiohttp"
+            return False, "缺少 aiohttp，无法下载图片。请安装：pip install aiohttp"
 
         try:
             timeout = aiohttp.ClientTimeout(total=10)
