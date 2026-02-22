@@ -26,11 +26,11 @@ class MemeEcho(Star):
     /meme del <KEY|别名>    删除
     /meme reload            重建索引
     """
-    # 改动点1：添加 __init__ 方法，接收 config 参数（符合新版插件规范）
-    def __init__(self, config: dict):
+    # 改动点：将 config 设为可选参数（默认值 None），兼容框架的无参数初始化
+    def __init__(self, config: dict = None):
         super().__init__()
-        # 保存 config 参数（框架自动传入，即使暂时不用也要接收）
-        self.config = config or {}
+        # 容错处理：确保 config 始终是字典类型
+        self.config = config if config is not None else {}
 
     async def initialize(self):
         # ✅ 所有初始化都放这里，不要写 __init__
