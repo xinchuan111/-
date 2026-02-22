@@ -3,4 +3,5 @@ display_name: 识别表情包并复读 # 用于展示的名字，可以是方便
 desc: 识别表情包并复读。 # 插件简短描述
 version: v0.0.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: xinchuan111 # 作者
-repo: https://github.com/xinchuan111/- # 插件的仓库地址
+repo: https://github.com/xinchuan111/astrbot_plugin_meme_echo # 插件的仓库地址
+main: main.py
